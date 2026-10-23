@@ -11,6 +11,25 @@ type ChatResponse = {
   status: ResponseStatus
   answer?: string
   citations?: number[]
+  citationDetails?: C5Citation[]
+}
+
+type C5Citation = {
+  evidence_id: string
+  filename: string
+  page: number
+  quote: string
+}
+
+type C5ChatResponse = {
+  status:
+    | 'ANSWERED'
+    | 'INSUFFICIENT_EVIDENCE'
+    | 'NO_READY_DOCUMENTS'
+    | 'SYSTEM_ERROR'
+  answer: string | null
+  citations: C5Citation[]
+  message: string | null
 }
 
 type RecommendedScenario = {
@@ -41,6 +60,7 @@ type Message = {
   role: 'user' | 'assistant'
   body: string
   citations?: number[]
+  citationDetails?: C5Citation[]
   kind?: ChatMode
   responseStatus?: ResponseStatus
   request?: string
@@ -54,12 +74,81 @@ type Conversation = {
   isUntitled?: boolean
 }
 
-const initialDocuments: DocumentItem[] = [
-  { id: 1, name: '관세법 시행규칙_여행자휴대품면세범위.pdf', date: '2026年10月15日 14:32', status: 'Ready', size: '2.8 MB', pages: 24, country: '韩国' },
-  { id: 2, name: '中国海关_进境旅客行李物品通关须知.pdf', date: '2026年10月15日 14:18', status: 'Ready', size: '4.1 MB', pages: 36, country: '中国' },
-  { id: 3, name: '한국관세청_여행자휴대품신고안내.pdf', date: '2026年10月15日 13:04', status: 'Processing', size: '1.6 MB', pages: null, country: '韩国' },
-  { id: 4, name: '구버전_한국입국물품신고안내_스캔본.pdf', date: '2026年10月15日 17:46', status: 'Failed', size: '4.7 MB', pages: null, country: '韩国', errorMessage: '실패 사유: 텍스트를 추출할 수 없음 · 스캔 문서' },
+type C1Document = {
+  document_id: string
+  filename: string
+  status: 'READY' | 'PROCESSING' | 'FAILED'
+  error_message: string | null
+  page_count: number | null
+  uploaded_at: string
+}
+
+function convertC1Document(
+  doc: C1Document,
+  id: number,
+  size: string,
+  country: '中国' | '韩国'
+): DocumentItem {
+  return {
+    id,
+    name: doc.filename,
+    date: doc.uploaded_at,
+    status:
+      doc.status === 'READY'
+        ? 'Ready'
+        : doc.status === 'PROCESSING'
+          ? 'Processing'
+          : 'Failed',
+    size,
+    pages: doc.page_count,
+    country,
+    errorMessage: doc.error_message ?? undefined
+  }
+}
+
+const mockC1Documents: C1Document[] = [
+  {
+    document_id: 'doc_001',
+    filename: '관세법 시행규칙_여행자휴대품면세범위.pdf',
+    status: 'READY',
+    error_message: null,
+    page_count: 24,
+    uploaded_at: '2026-10-15T14:32:00+09:00',
+  },
+  {
+    document_id: 'doc_002',
+    filename: '中国海关_进境旅客行李物品通关须知.pdf',
+    status: 'READY',
+    error_message: null,
+    page_count: 36,
+    uploaded_at: '2026-10-15T14:18:00+09:00',
+  },
+  {
+    document_id: 'doc_003',
+    filename: '한국관세청_여행자휴대품신고안내.pdf',
+    status: 'PROCESSING',
+    error_message: null,
+    page_count: null,
+    uploaded_at: '2026-10-15T13:04:00+09:00',
+  },
+  {
+    document_id: 'doc_004',
+    filename: '구버전_한국입국물품신고안내_스캔본.pdf',
+    status: 'FAILED',
+    error_message: '실패 사유: 텍스트를 추출할 수 없음 · 스캔 문서',
+    page_count: null,
+    uploaded_at: '2026-10-15T17:46:00+09:00',
+  },
 ]
+
+const initialDocuments: DocumentItem[] = mockC1Documents.map((doc, index) =>
+  convertC1Document(
+    doc,
+    index + 1,
+    ['2.8 MB', '4.1 MB', '1.6 MB', '4.7 MB'][index],
+    index === 1 ? '中国' : '韩国'
+  )
+)
 
 const citations: Citation[] = [
   {
@@ -85,20 +174,85 @@ const initialMessages: Message[] = [
 const enableDevelopmentScenarioControls = false
 
 // Deterministic prototype simulation; replace this function with an API call that returns ChatResponse.
-function createMockChatResponse(question: string, readyDocumentCount: number): ChatResponse {
-  if (readyDocumentCount === 0) return { status: 'NO_READY_DOCUMENTS' }
+// Convert the C5 API response into the format used by the Chat UI.
+function convertC5ChatResponse(data: C5ChatResponse): ChatResponse {
+  return {
+    status: data.status === 'ANSWERED' ? 'ANSWER' : data.status,
+    answer: data.answer ?? undefined,
+    citations: data.citations
+      .map((citation) => {
+        const citationId = Number(
+          citation.evidence_id.replace(/^E/i, '')
+        )
+        return citationId
+      })
+      .filter((id) => Number.isFinite(id)),
+    citationDetails: data.citations,
+  }
+}
 
-  const normalized = question.toLowerCase()
-  if (/(시스템 오류|서버 오류|에러|system error|server error|系统错误|服务器错误)/i.test(normalized)) {
-    return { status: 'SYSTEM_ERROR' }
+// Generate a mock chat response using the C5 API response format.
+function createMockChatResponse(
+  question: string,
+  readyDocumentCount: number
+): ChatResponse {
+  let mockResponse: C5ChatResponse
+
+  if (readyDocumentCount === 0) {
+    mockResponse = {
+      status: 'NO_READY_DOCUMENTS',
+      answer: null,
+      citations: [],
+      message: '현재 사용 가능한 정책 문서가 없습니다.',
+    }
+  } else if (
+    /(시스템 오류|서버 오류|에러|system error|server error|系统错误|服务器错误)/i.test(question)
+  ) {
+    mockResponse = {
+      status: 'SYSTEM_ERROR',
+      answer: null,
+      citations: [],
+      message: '일시적인 시스템 오류가 발생했습니다.',
+    }
+  } else if (
+    /(담배|궐련|香烟|卷烟|cigarette|tobacco)/i.test(question)
+  ) {
+    let answer =
+      '根据已上传的演示文件，韩国入境时普通香烟的免税限额为每名旅客 200 支。携带 400 支超过免税限额，需要向海关申报。实际税额仍需根据适用条件确认。'
+
+    if (/[가-힣]/.test(question)) {
+      answer =
+        '아니요. 한국 입국 시 일반 담배의 면세한도는 여행자 1명당 200개비(1보루)입니다. 400개비는 면세한도를 초과하므로 세관에 신고해야 합니다. 실제 세금은 적용 조건에 따라 확인이 필요합니다.'
+    }
+
+    if (/^[\x00-\x7F\s?.,'!-]+$/.test(question)) {
+      answer =
+        'No. The duty-free allowance for regular cigarettes when entering Korea is 200 cigarettes per traveler. Carrying 400 exceeds the allowance and must be declared to customs.'
+    }
+
+    mockResponse = {
+      status: 'ANSWERED',
+      answer,
+      citations: [
+        {
+          evidence_id: 'E1',
+          filename: '관세법 시행규칙_여행자휴대품면세범위.pdf',
+          page: 1,
+          quote: '담배 · 궐련 · 200개비',
+        },
+      ],
+      message: null,
+    }
+  } else {
+    mockResponse = {
+      status: 'INSUFFICIENT_EVIDENCE',
+      answer: null,
+      citations: [],
+      message: '현재 정책 문서에서 충분한 근거를 찾지 못했습니다.',
+    }
   }
-  if (/(담배|궐련|香烟|卷烟|cigarette|tobacco)/i.test(normalized)) {
-    let answer = '根据已上传的演示文件，韩国入境时普通香烟的免税限额为每名旅客 200 支。携带 400 支超过免税限额，需要向海关申报。实际税额仍需根据适用条件确认。'
-    if (/[가-힣]/.test(question)) answer = '아니요. 한국 입국 시 일반 담배의 면세한도는 여행자 1명당 200개비(1보루)입니다. 400개비는 면세한도를 초과하므로 세관에 신고해야 합니다. 실제 세금은 적용 조건에 따라 확인이 필요합니다.'
-    if (/^[\x00-\x7F\s?.,'!-]+$/.test(question)) answer = 'No. The duty-free allowance for regular cigarettes when entering Korea is 200 cigarettes per traveler. Carrying 400 exceeds the allowance and must be declared to customs. Actual tax depends on the applicable conditions.'
-    return { status: 'ANSWER', answer, citations: [1] }
-  }
-  return { status: 'INSUFFICIENT_EVIDENCE' }
+
+  return convertC5ChatResponse(mockResponse)
 }
 
 const initialConversations: Conversation[] = [
@@ -442,45 +596,139 @@ function CitationPanel({
   onSelect,
   responseStatus,
   onOpenDocuments,
+  items = citations,
 }: {
   selectedId: number
   onSelect: (id: number) => void
   responseStatus?: ResponseStatus
   onOpenDocuments: () => void
+  items?: Citation[]
 }) {
   const { t } = useI18n()
-  const citation = citations.find((item) => item.id === selectedId) ?? citations[0]
+
+  // Find the selected citation from the provided data.
+  const citation =
+    items.find((item) => item.id === selectedId) ?? items[0]
+
+  // Display an empty state for non-answered responses.
   if (responseStatus && responseStatus !== 'ANSWER') {
-    const emptyMessages: Record<Exclude<ResponseStatus, 'ANSWER'>, string> = {
+    const emptyMessages: Record<
+      Exclude<ResponseStatus, 'ANSWER'>,
+      string
+    > = {
       INSUFFICIENT_EVIDENCE: t('citations.empty.insufficient'),
       NO_READY_DOCUMENTS: t('citations.empty.noReady'),
       SYSTEM_ERROR: t('citations.empty.system'),
     }
+
     return (
       <aside className="details-panel citation-panel">
-        <div className="details-head"><div><span className="eyebrow">{t('citations.eyebrow')}</span><div className="panel-title">{t('citations.title')}</div></div><span className="source-count">{t('citations.count', { count: 0 })}</span></div>
+        <div className="details-head">
+          <div>
+            <span className="eyebrow">
+              {t('citations.eyebrow')}
+            </span>
+            <div className="panel-title">
+              {t('citations.title')}
+            </div>
+          </div>
+          <span className="source-count">
+            {t('citations.count', { count: 0 })}
+          </span>
+        </div>
+
         <div className="blank-panel citation-empty">
-          <div className="blank-icon"><Icon name={responseStatus === 'SYSTEM_ERROR' ? 'warning' : 'info'} size={22}/></div>
+          <div className="blank-icon">
+            <Icon
+              name={responseStatus === 'SYSTEM_ERROR' ? 'warning' : 'info'}
+              size={22}
+            />
+          </div>
+
           <p>{emptyMessages[responseStatus]}</p>
-          {responseStatus === 'NO_READY_DOCUMENTS' && <Button variant="default" onClick={onOpenDocuments}>{t('chat.goDocuments')}</Button>}
+
+          {responseStatus === 'NO_READY_DOCUMENTS' && (
+            <Button variant="default" onClick={onOpenDocuments}>
+              {t('chat.goDocuments')}
+            </Button>
+          )}
         </div>
       </aside>
     )
   }
+
+  // Display available citation data.
   return (
     <aside className="details-panel citation-panel">
-      <div className="details-head"><div><span className="eyebrow">{t('citations.eyebrow')}</span><div className="panel-title">{t('citations.title')}</div></div><span className="source-count">{t('citations.count', { count: citations.length })}</span></div>
+      <div className="details-head">
+        <div>
+          <span className="eyebrow">
+            {t('citations.eyebrow')}
+          </span>
+          <div className="panel-title">
+            {t('citations.title')}
+          </div>
+        </div>
+        <span className="source-count">
+          {t('citations.count', { count: items.length })}
+        </span>
+      </div>
+
       <div className="citation-tabs">
-        {citations.slice(0, 2).map((item) => <Button key={item.id} variant="ghost" className={selectedId === item.id ? 'active' : ''} onClick={() => onSelect(item.id)}>[{item.id}]</Button>)}
+        {items.slice(0, 2).map((item) => (
+          <Button
+            key={item.id}
+            variant="ghost"
+            className={selectedId === item.id ? 'active' : ''}
+            onClick={() => onSelect(item.id)}
+          >
+            [{item.id}]
+          </Button>
+        ))}
       </div>
-      <div className="citation-card">
-        <div className="citation-file"><span className="pdf-icon large"><Icon name="file" size={19}/></span><div><strong>{citation.document}</strong><span>{t('citations.koreanLawPdf')}</span></div></div>
-        <div className="page-number"><span>{t('citations.reference')}</span><strong>{citation.reference}</strong></div>
-        <div className="evidence-label"><span>{t('citations.original')}</span><span>{t('disclaimer.demo')}</span></div>
-        <blockquote>{citation.text}</blockquote>
-        <div className="evidence-note"><Icon name="info" size={15}/><span>{t('citations.note')}</span></div>
+
+      {citation ? (
+        <div className="citation-card">
+          <div className="citation-file">
+            <span className="pdf-icon large">
+              <Icon name="file" size={19} />
+            </span>
+            <div>
+              <strong>{citation.document}</strong>
+              <span>{t('citations.koreanLawPdf')}</span>
+            </div>
+          </div>
+
+          <div className="page-number">
+            <span>{t('citations.reference')}</span>
+            <strong>{citation.reference}</strong>
+          </div>
+
+          <div className="evidence-label">
+            <span>{t('citations.original')}</span>
+            <span>{t('disclaimer.demo')}</span>
+          </div>
+
+          <blockquote>{citation.text}</blockquote>
+
+          <div className="evidence-note">
+            <Icon name="info" size={15} />
+            <span>{t('citations.note')}</span>
+          </div>
+        </div>
+      ) : (
+        <div className="blank-panel citation-empty">
+          <div className="blank-icon">
+            <Icon name="info" size={22} />
+          </div>
+          <p>{t('citations.empty.insufficient')}</p>
+        </div>
+      )}
+
+      <div className="citation-guide">
+        <strong>{t('citations.guideTitle')}</strong>
+        <p>{t('citations.guideBody')}</p>
       </div>
-      <div className="citation-guide"><strong>{t('citations.guideTitle')}</strong><p>{t('citations.guideBody')}</p></div>
     </aside>
   )
 }
@@ -514,6 +762,14 @@ function ChatPage({
   const latestAssistantMessage = [...messages].reverse().find((message) => message.role === 'assistant')
   const citationPanelStatus = latestAssistantMessage?.responseStatus
     ?? (latestAssistantMessage?.citations?.length ? 'ANSWER' : undefined)
+    const currentCitations: Citation[] =
+  latestAssistantMessage?.citationDetails?.map((item, index) => ({
+    id: Number(item.evidence_id.replace(/^E/i, '')) || index + 1,
+    document: item.filename,
+    reference: `PDF p.${item.page}`,
+    text: item.quote,
+  })) ?? citations     //Convert C5 citation details into the CitationPanel display format.
+  
   const exceptionContent: Record<Exclude<ChatMode, 'NORMAL'>, { title: string; body: string; action: string; prompt: string }> = {
     CLARIFICATION: {
       title: t('exception.clarification.title'),
@@ -585,6 +841,7 @@ function ChatPage({
         role: 'assistant',
         body,
         citations: response.citations,
+        citationDetails: response.citationDetails,
         responseStatus: response.status,
         request: question,
       }])
@@ -693,9 +950,15 @@ function ChatPage({
           <div className="ai-note">{t('chat.aiNote')}</div>
         </div>
       </main>
-      <CitationPanel selectedId={selectedCitation} onSelect={setSelectedCitation} responseStatus={citationPanelStatus} onOpenDocuments={onOpenDocuments}/>
-    </>
-  )
+      <CitationPanel
+  selectedId={selectedCitation}
+  onSelect={setSelectedCitation}
+  responseStatus={citationPanelStatus}
+  onOpenDocuments={onOpenDocuments}
+  items={currentCitations}
+/>
+</>
+)
 }
 
 export default function App() {
